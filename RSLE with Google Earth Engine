@@ -1,4 +1,4 @@
-
+// 2019-06-29
 // Create by Qiaodan in TU Delft, shared with Thijs
 // Create MOD10A1 image collections for the time period
 var MOD10A1 = ee.ImageCollection('MODIS/006/MOD10A1').select('NDSI_Snow_Cover','NDSI_Snow_Cover_Class')
