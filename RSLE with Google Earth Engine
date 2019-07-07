@@ -1,0 +1,118 @@
+
+// Create by Qiaodan in TU Delft, shared with Thijs
+// Create MOD10A1 image collections for the time period
+var MOD10A1 = ee.ImageCollection('MODIS/006/MOD10A1').select('NDSI_Snow_Cover','NDSI_Snow_Cover_Class')
+                                                    .filterDate('2018-01-01', '2019-01-01');
+
+// A function to reclassify MODIS images for snow cover computation
+var arr1 = ee.List.sequence(0, 100);
+var arr2 = ee.List.repeat(-1, 41).cat(ee.List.repeat(1, 60));
+var Reclassify = function(anImage) {
+  var RemapImage = anImage.remap(arr1,   // Original pixel values from MODIS Snow Products
+                                 arr2,   // Reclassified values: 1: snow; -1: no snow
+                                 0,      // all other values
+                                 'NDSI_Snow_Cover');
+  return RemapImage;
+};
+// A function to reclassify MODIS images for cloud coverge (Cc) threshold
+var Ccthreshold = function(anImage) {
+  var RemapImage = anImage.remap([250],
+                                 [-1],    // Reclassified values: -x: cloud
+                                 1,     // No cloud, here -x for 1/(1+x) as Cc threshold
+                                 'NDSI_Snow_Cover_Class');
+  return RemapImage;
+};
+
+// Grid building
+// Get the coordinates of study area
+var Pos = ee.List(StudyArea.coordinates());
+// Create bounding box
+var lon_start = 81;
+var lon_end = 86;
+var lat_start = 41;
+var lat_end = 45;
+// Decide cells
+var lon_edge = (lon_end-lon_start)/25;
+var lat_edge = (lat_end-lat_start)/20;
+// Create the grid
+var polys = [];
+var cell_id = 0;
+for (var lon = lon_start; lon < lon_end; lon += lon_edge) {
+  var x1 = lon;
+  var x2 = lon + lon_edge;
+  for (var lat = lat_start; lat < lat_end; lat += lat_edge) {
+    cell_id = cell_id+1;
+    var y1 = lat;
+    var y2 = lat + lat_edge;
+
+    polys.push(ee.Feature(ee.Geometry.Rectangle(x1, y1, x2, y2), {label: cell_id}));
+  }
+}
+var grid = ee.FeatureCollection(polys).filterBounds(StudyArea);
+//var gridbox = ee.Image().toByte().paint(grid.geometry(), 0, 1);
+//Map.addLayer(gridbox)
+
+// Pre-progress
+var Elev = Height.reduceRegions(grid, ee.Reducer.mean(), 200);
+var SC = MOD10A1.map(Reclassify);
+var cloud = MOD10A1.map(Ccthreshold);
+
+var innerJoin = ee.Join.inner();
+var filterTimeEq = ee.Filter.equals({
+  leftField: 'system:time_start',
+  rightField: 'system:time_start'
+});
+var jMODIS = innerJoin.apply(SC, cloud, filterTimeEq);
+var merge = function(aRow){
+  var anImage = ee.Image.cat(aRow.get('primary'), aRow.get('secondary'));
+  return anImage;
+};
+jMODIS = jMODIS.map(merge);
+
+// warping map start
+var RSLEfunc = function(anImage) {
+  var Ftc1 = ee.Image(anImage).reduceRegions(grid, ee.Reducer.sum(), 500);
+
+  // Cloud Filter function
+  var CF = function(Ft) {
+    return ee.Algorithms.If(ee.Number(Ft.get('remapped_1')).gte(0),
+      Ft,
+      null);
+  };
+  Ftc1 = Ftc1.map(CF,true);
+  
+  // Join average height
+  var filterIdEq = ee.Filter.equals({
+    leftField: 'label',
+    rightField: 'label'
+  });
+  var FinalMODIS = innerJoin.apply(Ftc1, Elev, filterIdEq);
+  FinalMODIS = FinalMODIS.map(function(pair) {
+    var f1 = ee.Feature(pair.get('primary'));
+    var f2 = ee.Feature(pair.get('secondary'));
+    return f1.set(f2.toDictionary());
+  });
+  
+  // Count Sum of RSLE pixels for pixels
+  var SumPixel = function(Ft) {
+    var TotalCount = function(Ft) {
+      var Ta = ee.Number(Ft.get('mean')).subtract(Sa);
+      var Tb = ee.Number(Ft.get('remapped')).multiply(Ta);
+      return ee.Algorithms.If(Tb.lte(0),
+        ee.Feature(null, {snow: Ta}),
+        null);
+    };
+    var Sa = ee.Number(Ft.get('mean'));
+    var Sb = ee.FeatureCollection(FinalMODIS.map(TotalCount,true)).size();
+    return ee.Feature(null, {SP: ee.Number(Sb), RSLE: Ft.get('mean')});
+  };
+  var SPs = ee.FeatureCollection(FinalMODIS.map(SumPixel));
+  var RSLE = ee.Algorithms.If(SPs.size().gt(0),
+    ee.Feature(SPs.toList(SPs.size()).get(0)),
+    ee.Feature(null, {SP: 0, RSLE: 0}));
+  return RSLE;
+};
+var ListRSLE = jMODIS.map(RSLEfunc);
+var FinalList = ListRSLE.aggregate_array('RSLE');
+
+Export.table.toDrive({collection: ListRSLE, description: 'RSLE', folder: 'EVA', selectors: 'RSLE'});
