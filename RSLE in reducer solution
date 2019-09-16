@@ -1,0 +1,75 @@
+var QL = /* color: #3aec70 */ee.FeatureCollection(
+        [ee.Feature(
+            ee.Geometry.Polygon(
+                [[[93, 39],
+                  [93, 39.5],
+                  [96, 40],
+                  [97.5, 40],
+                  [103, 37.5],
+                  [103, 35.5],
+                  [95.5, 37.5]]]),
+            {
+              "system:index": "0"
+            })]);
+
+//The reprojection variables
+var crs = 'EPSG:3857';
+var mp = 65536;
+
+//import Datasets
+var H1 = ee.Image("USGS/GMTED2010").clip(QL);
+var M1 = ee.ImageCollection('MODIS/006/MOD10A1')
+.select('NDSI_Snow_Cover').filterDate('2017-10-01','2018-10-01');
+M1 = M1.map(function(img){
+  img = img.clip(QL);
+  var rimg = img.reduceResolution({reducer:ee.Reducer.mean(),maxPixels:mp,
+  bestEffort:false}).reproject({crs:crs,scale:500});
+  return ee.Image(rimg)});
+M1 = M1.map(function(img){return ee.Image(img.gte(33))}); //1: snow; 0: no snow; null: no data (clouds, etc.)
+
+//cdf precentile list
+var step = 2;
+var start = step;
+var end = 100-step;
+var percent = ee.List.sequence(start,end,step);
+
+//elevation contour based on cdf
+var E1 = ee.Image(H1.reduceResolution({reducer:ee.Reducer.mean(),
+maxPixels:mp,bestEffort:false}).reproject({crs:crs,scale:500}));
+var E2 = ee.Image(E1.reduceResolution({reducer:ee.Reducer.percentile(percent),
+maxPixels:mp,bestEffort:false}).reproject({crs:crs,scale:5000}));
+var E3 = ee.Image(E1.gt(E2)); //1: pixel elevation > tile band elevation; 0: pixel <= tile band
+
+//create snow-elevation map
+//no snow above the band: abs(0-1) = 1; no snow below the band: abs(0-0) = 0;
+//snow above the band: abs(1-1) = 0; snow below the band: abs(1-0) = 1;
+//no snow data: null
+var Func1 = function(img){return img.subtract(E3).abs()};
+var S1 = M1.map(Func1);
+
+//sum up all pixels in the tile
+var S2 = S1.map(function(img){
+  var rimg = img.reduceResolution({reducer:ee.Reducer.sum().unweighted(),maxPixels:mp,
+  bestEffort:false}).reproject({crs:crs,scale:5000});
+  return ee.Image(rimg)});
+
+//Function for RSLE
+var model = function(img) {
+  var BN = E2.bandNames();
+  var FSR = function(ls) {
+    var IE = ee.Image(E2.select(ee.String(ls))).round().rename('elevation'); //transform bands to images
+    var IS = ee.Image(img.select(ee.String(ls))).round().rename('snow');
+    var IR = ee.Image(IS.add(IE.multiply(ee.Number(0.00001)))).rename('RSLE'); //combine them to 'snow.0elev'
+    return IR};
+  var ICR = ee.ImageCollection(BN.map(FSR));
+  var IF = ICR.min(); //ImageC.min() calculate the minimum value of each pixel across the stack.
+  var A1 = ee.Image(IF.floor());
+  var A2 = ee.Image((IF.subtract(A1)).multiply(ee.Number(100000)));
+  return A2};
+var MSL = S2.map(model);
+print(MSL);
+
+//show everything
+Map.addLayer(MSL.first(),{min:3000,max:6000,palette:['red','black']});
+//Map.addLayer(M1.first(),{min:0,max:1,palette:['red','black']});
+Map.centerObject(QL,6);
